@@ -182,7 +182,7 @@ CONSOLIDATION_PROMPT = """You are maintaining a set of facts about an ongoing se
 ## Instructions
 Follow these three steps IN ORDER:
 
-STEP 1 — Handle EVERY existing fact. For each one, output exactly one action:
+STEP 1 — Handle every existing fact listed above. For each one, output exactly one action:
 - "keep": Fact is still accurate and unchanged. Include source_fact_id.
 - "update": ANY detail in the fact has changed. Include source_fact_id, the corrected content, and reason.
 - "remove": Fact is no longer true or was explicitly revoked. Include source_fact_id and reason.
@@ -193,7 +193,7 @@ STEP 3 — Check for NEW information. Read through the new turns again. For each
 - "add": New information. Include content, type, and confidence.
 
 IMPORTANT RULES:
-1. You MUST output one action for EVERY existing fact — do not skip any.
+1. You MUST output one action for every existing fact listed above — do not skip any.
 2. If a fact says "X" but the conversation now says "Y", that is an UPDATE — not a keep.
 3. After handling all existing facts, you MUST add any new details from the turns that are not covered.
 4. One fact = one atomic piece of information. Do not merge unrelated facts.

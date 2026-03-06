@@ -227,11 +227,18 @@ class ReflectionRunner:
                         episode, turns, prior_facts, trace
                     )
                     self._emit_trace(trace, start)
+                    await self._enforce_active_fact_limit()
                     return result
 
             # First episode, no prior facts, or legacy reflector
-            result = await self._legacy_reflect_and_save(episode, turns, trace)
+            existing_facts = await self._storage.get_active_facts_by_session(
+                self._session_id
+            )
+            result = await self._legacy_reflect_and_save(
+                episode, turns, trace, existing_facts=existing_facts or None
+            )
             self._emit_trace(trace, start)
+            await self._enforce_active_fact_limit()
             return result
 
         except Exception as e:
@@ -293,12 +300,14 @@ class ReflectionRunner:
                 "falling back to legacy path",
                 episode.id,
             )
-            return await self._legacy_reflect_and_save(episode, turns, trace)
+            return await self._legacy_reflect_and_save(
+                episode, turns, trace, existing_facts=all_active_facts
+            )
 
         validate_coverage(relevant_facts, actions)
 
         return await self._apply_consolidation_actions(
-            episode, actions, relevant_facts, trace
+            episode, actions, all_active_facts, trace
         )
 
     async def _scope_relevant_facts(
@@ -309,13 +318,20 @@ class ReflectionRunner:
     ) -> list["Fact"]:
         """Select prior facts relevant to this episode via embedding similarity.
 
-        If the embedder returns zero vectors (NullEmbedder), all prior
-        facts are included to avoid silent data loss.
+        For small fact sets (at or below ``consolidation_max_unscoped_facts``),
+        all facts are returned to avoid filtering out facts that need updating.
+
+        For larger sets, embedding similarity is used to select a relevant
+        subset, with conservative thresholds to minimize false exclusions.
         """
         if not prior_facts:
             return []
 
-        # Build a summary of the episode content for embedding
+        max_unscoped = self._config.reflection.consolidation_max_unscoped_facts
+        if len(prior_facts) <= max_unscoped:
+            return prior_facts
+
+        # Large fact set — use embedding similarity to scope
         episode_text = " ".join(t.content for t in turns)
         try:
             embeddings = await self._embedder.embed([episode_text])
@@ -337,7 +353,6 @@ class ReflectionRunner:
 
         for fact in prior_facts:
             if fact.embedding_id is None:
-                # Facts without embeddings are always included
                 relevant.append(fact)
                 continue
 
@@ -476,8 +491,19 @@ class ReflectionRunner:
         episode: "Episode",
         turns: list["Turn"],
         trace: ReflectionTrace | None = None,
+        *,
+        existing_facts: list["Fact"] | None = None,
     ) -> list["Fact"]:
-        """Original reflection path — extract facts in isolation."""
+        """Original reflection path — extract facts in isolation.
+
+        Args:
+            episode: The closed episode.
+            turns: Turns in the episode.
+            trace: Optional observability trace.
+            existing_facts: Active facts to dedup against. When provided,
+                new facts that are semantic duplicates of existing ones
+                are silently skipped.
+        """
         if trace:
             trace.mode = "legacy"
 
@@ -492,6 +518,9 @@ class ReflectionRunner:
         saved_facts: list["Fact"] = []
         for fact in facts[: self._config.reflection.max_facts_per_episode]:
             if fact.confidence < self._config.reflection.min_confidence:
+                continue
+
+            if existing_facts and await self._is_duplicate(fact, existing_facts):
                 continue
 
             fact = await self._embed_and_save_fact(fact, episode)
@@ -539,6 +568,37 @@ class ReflectionRunner:
             self._trace_callback(trace)
         except Exception:
             logger.warning("Trace callback raised an exception", exc_info=True)
+
+    async def _enforce_active_fact_limit(self) -> None:
+        """Archive lowest-confidence facts when the active count exceeds the limit.
+
+        Archived facts are marked with ``superseded_by="archived_excess"``
+        so they no longer appear in recall or consolidation queries.
+        """
+        max_facts = self._config.reflection.max_active_facts
+        active_facts = await self._storage.get_active_facts_by_session(
+            self._session_id
+        )
+        excess = len(active_facts) - max_facts
+        if excess <= 0:
+            return
+
+        # Sort by confidence (ascending), then by creation date (oldest first)
+        to_archive = sorted(
+            active_facts,
+            key=lambda f: (f.confidence, f.created_at),
+        )[:excess]
+
+        for fact in to_archive:
+            archived = replace(fact, superseded_by="archived_excess")
+            await self._storage.update_fact(archived)
+
+        logger.info(
+            "Archived %d excess facts for session %s (limit: %d)",
+            len(to_archive),
+            self._session_id,
+            max_facts,
+        )
 
     async def _is_duplicate(
         self,

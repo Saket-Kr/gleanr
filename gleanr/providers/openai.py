@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import logging
+from typing import TYPE_CHECKING, Any
 
 from gleanr.errors import ProviderError
 from gleanr.models import Fact
@@ -15,11 +16,31 @@ from gleanr.providers.parsing import (
     parse_consolidation_actions,
     parse_reflection_facts,
 )
+from gleanr.utils.retry import RetryConfig, with_retry
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
 
     from gleanr.models import Episode, Turn
+
+logger = logging.getLogger(__name__)
+
+try:
+    from openai import (
+        APIConnectionError as OpenAIConnectionError,
+        APITimeoutError as OpenAITimeoutError,
+        InternalServerError as OpenAIInternalError,
+        RateLimitError as OpenAIRateLimitError,
+    )
+
+    _OPENAI_RETRYABLE: tuple[type[Exception], ...] = (
+        OpenAITimeoutError,
+        OpenAIConnectionError,
+        OpenAIRateLimitError,
+        OpenAIInternalError,
+    )
+except ImportError:
+    _OPENAI_RETRYABLE = (TimeoutError, ConnectionError)
 
 # Model dimensions for common OpenAI embedding models
 MODEL_DIMENSIONS = {
@@ -115,6 +136,7 @@ class OpenAIReflector:
         model: str = "gpt-4o-mini",
         *,
         max_facts: int = 5,
+        max_retries: int = 3,
     ) -> None:
         """Initialize OpenAI reflector.
 
@@ -122,10 +144,17 @@ class OpenAIReflector:
             client: Configured AsyncOpenAI client
             model: Chat model name
             max_facts: Maximum facts to extract per episode
+            max_retries: Maximum retry attempts for API calls
         """
         self._client = client
         self._model = model
         self._max_facts = max_facts
+        self._retry_config = RetryConfig(
+            max_attempts=max_retries,
+            base_delay=1.0,
+            max_delay=30.0,
+            retryable_exceptions=_OPENAI_RETRYABLE,
+        )
 
     async def reflect(self, episode: "Episode", turns: list["Turn"]) -> list[Fact]:
         """Extract semantic facts from an episode.
@@ -138,13 +167,12 @@ class OpenAIReflector:
             List of extracted facts
 
         Raises:
-            ProviderError: If reflection fails
+            ProviderError: If reflection fails after retries
         """
         if not turns:
             return []
 
         try:
-            # Format turns for the prompt
             turns_text = "\n".join(
                 f"[{t.role.value}]: {t.content}" for t in turns
             )
@@ -154,10 +182,11 @@ class OpenAIReflector:
                 max_facts=self._max_facts,
             )
 
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
+            response = await with_retry(
+                self._chat_completion,
+                self._retry_config,
+                on_retry=self._log_retry,
+                prompt=prompt,
             )
 
             content = response.choices[0].message.content or "{}"
@@ -169,7 +198,7 @@ class OpenAIReflector:
             raise ProviderError(
                 f"OpenAI reflection failed: {e}",
                 provider="OpenAIReflector",
-                retryable=True,
+                retryable=False,
                 cause=e,
             ) from e
 
@@ -193,10 +222,11 @@ class OpenAIReflector:
                 turns=format_turns(turns),
             )
 
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
+            response = await with_retry(
+                self._chat_completion,
+                self._retry_config,
+                on_retry=self._log_retry,
+                prompt=prompt,
             )
 
             content = response.choices[0].message.content or "{}"
@@ -208,6 +238,20 @@ class OpenAIReflector:
             raise ProviderError(
                 f"OpenAI consolidation failed: {e}",
                 provider="OpenAIReflector",
-                retryable=True,
+                retryable=False,
                 cause=e,
             ) from e
+
+    async def _chat_completion(self, prompt: str) -> Any:
+        """Make a single chat completion request."""
+        return await self._client.chat.completions.create(
+            model=self._model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+
+    @staticmethod
+    def _log_retry(attempt: int, error: Exception) -> None:
+        logger.warning(
+            "OpenAI API call failed (attempt %d), retrying: %s", attempt, error
+        )

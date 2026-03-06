@@ -44,13 +44,13 @@ class RecallConfig:
     default_token_budget: int = 4000
     """Default token budget when not specified."""
 
-    current_episode_budget_pct: float = 0.4
+    current_episode_budget_pct: float = 0.2
     """Percentage of budget reserved for current episode (0-1)."""
 
     max_vector_results: int = 50
     """Maximum results from vector search."""
 
-    min_relevance_threshold: float = 0.0
+    min_relevance_threshold: float = 0.3
     """Minimum relevance score to include in results."""
 
     def validate(self) -> None:
@@ -76,14 +76,23 @@ class ReflectionConfig:
     min_episode_turns: int = 2
     """Minimum turns in episode to trigger reflection."""
 
-    max_facts_per_episode: int = 5
+    max_facts_per_episode: int = 10
     """Maximum facts to extract per episode."""
 
     min_confidence: float = 0.7
     """Minimum confidence score for extracted facts."""
 
-    consolidation_similarity_threshold: float = 0.3
-    """Minimum embedding similarity for a prior fact to be included in consolidation scope."""
+    consolidation_similarity_threshold: float = 0.15
+    """Minimum embedding similarity for a prior fact to be included in consolidation scope.
+    Only applies when the number of active facts exceeds consolidation_max_unscoped_facts."""
+
+    consolidation_max_unscoped_facts: int = 50
+    """Skip similarity-based scoping when the active fact count is at or below this limit.
+    All facts are sent to the LLM for consolidation, ensuring none are missed."""
+
+    max_active_facts: int = 100
+    """Maximum number of active (non-superseded) facts per session.
+    When exceeded, lowest-confidence facts are archived after reflection."""
 
     dedup_similarity_threshold: float = 0.95
     """Cosine similarity above which a new fact is considered a duplicate of an existing active fact.
@@ -193,6 +202,8 @@ class GleanrConfig:
                 "max_facts_per_episode": self.reflection.max_facts_per_episode,
                 "min_confidence": self.reflection.min_confidence,
                 "consolidation_similarity_threshold": self.reflection.consolidation_similarity_threshold,
+                "consolidation_max_unscoped_facts": self.reflection.consolidation_max_unscoped_facts,
+                "max_active_facts": self.reflection.max_active_facts,
                 "dedup_similarity_threshold": self.reflection.dedup_similarity_threshold,
             },
             "cache": {

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import logging
+from typing import TYPE_CHECKING, Any
 
 from gleanr.errors import ProviderError
 from gleanr.models import Fact
@@ -15,11 +16,31 @@ from gleanr.providers.parsing import (
     parse_consolidation_actions,
     parse_reflection_facts,
 )
+from gleanr.utils.retry import RetryConfig, with_retry
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
 
     from gleanr.models import Episode, Turn
+
+logger = logging.getLogger(__name__)
+
+try:
+    from anthropic import (
+        APIConnectionError as AnthropicConnectionError,
+        APITimeoutError as AnthropicTimeoutError,
+        InternalServerError as AnthropicInternalError,
+        RateLimitError as AnthropicRateLimitError,
+    )
+
+    _ANTHROPIC_RETRYABLE: tuple[type[Exception], ...] = (
+        AnthropicTimeoutError,
+        AnthropicConnectionError,
+        AnthropicRateLimitError,
+        AnthropicInternalError,
+    )
+except ImportError:
+    _ANTHROPIC_RETRYABLE = (TimeoutError, ConnectionError)
 
 
 class AnthropicReflector:
@@ -35,6 +56,7 @@ class AnthropicReflector:
         *,
         max_facts: int = 5,
         max_tokens: int = 1024,
+        max_retries: int = 3,
     ) -> None:
         """Initialize Anthropic reflector.
 
@@ -43,11 +65,18 @@ class AnthropicReflector:
             model: Claude model name
             max_facts: Maximum facts to extract per episode
             max_tokens: Maximum tokens in response
+            max_retries: Maximum retry attempts for API calls
         """
         self._client = client
         self._model = model
         self._max_facts = max_facts
         self._max_tokens = max_tokens
+        self._retry_config = RetryConfig(
+            max_attempts=max_retries,
+            base_delay=1.0,
+            max_delay=30.0,
+            retryable_exceptions=_ANTHROPIC_RETRYABLE,
+        )
 
     async def reflect(self, episode: "Episode", turns: list["Turn"]) -> list[Fact]:
         """Extract semantic facts from an episode.
@@ -60,13 +89,12 @@ class AnthropicReflector:
             List of extracted facts
 
         Raises:
-            ProviderError: If reflection fails
+            ProviderError: If reflection fails after retries
         """
         if not turns:
             return []
 
         try:
-            # Format turns for the prompt
             turns_text = "\n".join(
                 f"[{t.role.value}]: {t.content}" for t in turns
             )
@@ -76,18 +104,14 @@ class AnthropicReflector:
                 max_facts=self._max_facts,
             )
 
-            response = await self._client.messages.create(
-                model=self._model,
-                max_tokens=self._max_tokens,
-                messages=[{"role": "user", "content": prompt}],
+            response = await with_retry(
+                self._message_create,
+                self._retry_config,
+                on_retry=self._log_retry,
+                prompt=prompt,
             )
 
-            # Extract text from response
-            content = ""
-            for block in response.content:
-                if hasattr(block, "text"):
-                    content += block.text
-
+            content = self._extract_text(response)
             return self._parse_facts(content, episode)
 
         except Exception as e:
@@ -96,7 +120,7 @@ class AnthropicReflector:
             raise ProviderError(
                 f"Anthropic reflection failed: {e}",
                 provider="AnthropicReflector",
-                retryable=True,
+                retryable=False,
                 cause=e,
             ) from e
 
@@ -120,17 +144,14 @@ class AnthropicReflector:
                 turns=format_turns(turns),
             )
 
-            response = await self._client.messages.create(
-                model=self._model,
-                max_tokens=self._max_tokens,
-                messages=[{"role": "user", "content": prompt}],
+            response = await with_retry(
+                self._message_create,
+                self._retry_config,
+                on_retry=self._log_retry,
+                prompt=prompt,
             )
 
-            content = ""
-            for block in response.content:
-                if hasattr(block, "text"):
-                    content += block.text
-
+            content = self._extract_text(response)
             return parse_consolidation_actions(content)
 
         except Exception as e:
@@ -139,8 +160,29 @@ class AnthropicReflector:
             raise ProviderError(
                 f"Anthropic consolidation failed: {e}",
                 provider="AnthropicReflector",
-                retryable=True,
+                retryable=False,
                 cause=e,
             ) from e
 
-        return facts
+    async def _message_create(self, prompt: str) -> Any:
+        """Make a single Anthropic messages API call."""
+        return await self._client.messages.create(
+            model=self._model,
+            max_tokens=self._max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+    @staticmethod
+    def _extract_text(response: Any) -> str:
+        """Extract text content from an Anthropic response."""
+        content = ""
+        for block in response.content:
+            if hasattr(block, "text"):
+                content += block.text
+        return content
+
+    @staticmethod
+    def _log_retry(attempt: int, error: Exception) -> None:
+        logger.warning(
+            "Anthropic API call failed (attempt %d), retrying: %s", attempt, error
+        )

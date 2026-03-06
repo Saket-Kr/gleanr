@@ -140,8 +140,13 @@ class RecallPipeline:
         self,
         query_embedding: list[float],
     ) -> list[ScoredCandidate]:
-        """Get candidates from L2 facts."""
+        """Get candidates from L2 facts.
+
+        Facts below ``min_relevance_threshold`` are excluded (except those
+        without embeddings, which default to 0.5 relevance).
+        """
         facts = await self._storage.get_active_facts_by_session(self._session_id)
+        min_relevance = self._config.recall.min_relevance_threshold
 
         candidates = []
         for fact in facts:
@@ -151,6 +156,9 @@ class RecallPipeline:
                 embedding = await self._storage.get_embedding(fact.embedding_id)
                 if embedding:
                     relevance = self._cosine_similarity(query_embedding, embedding)
+
+            if relevance < min_relevance:
+                continue
 
             # Facts get a boost based on their type (maps to markers)
             marker_boost = self._config.get_marker_weight(fact.fact_type)
@@ -242,7 +250,8 @@ class RecallPipeline:
         Priority:
         1. Current episode (reserved budget percentage)
         2. Marked turns (by score)
-        3. Facts + vector results (by score)
+        3. Facts (by score, compact and high-signal)
+        4. Vector search results (by score, fills remaining budget)
         """
         result: list[ContextItem] = []
         remaining_budget = token_budget
@@ -283,11 +292,16 @@ class RecallPipeline:
 
         remaining_budget -= marked_used
 
-        # Step 3: Fill with facts and vector results (merged by score)
-        combined = facts + vectors
-        combined.sort(key=lambda c: c.final_score, reverse=True)
+        # Step 3: Add facts first (compact, high-signal), then vector turns
+        for candidate in facts:
+            if remaining_budget <= 0:
+                break
+            if candidate.token_count <= remaining_budget:
+                result.append(self._candidate_to_context_item(candidate))
+                remaining_budget -= candidate.token_count
 
-        for candidate in combined:
+        # Step 4: Fill remaining budget with vector search results
+        for candidate in vectors:
             if remaining_budget <= 0:
                 break
             if candidate.token_count <= remaining_budget:

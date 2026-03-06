@@ -81,11 +81,26 @@ def validate_coverage(
         overlap = fact_keywords & all_action_keywords
         coverage_ratio = len(overlap) / len(fact_keywords)
 
-        if coverage_ratio < 0.5:
-            warnings.append(
-                f"Fact {fact.id} may not be covered by consolidation "
-                f"(keyword overlap {coverage_ratio:.0%}): {fact.content[:80]}"
-            )
+        if coverage_ratio >= 0.5:
+            continue
+
+        # For short facts (<=3 keywords), a single keyword match is sufficient
+        if len(fact_keywords) <= 3 and len(overlap) >= 1:
+            continue
+
+        # Substring fallback: catches morphological variants
+        # (e.g., "postgres" in "postgresql", "python" in "python3")
+        if any(
+            fk in ak or ak in fk
+            for fk in fact_keywords
+            for ak in all_action_keywords
+        ):
+            continue
+
+        warnings.append(
+            f"Fact {fact.id} may not be covered by consolidation "
+            f"(keyword overlap {coverage_ratio:.0%}): {fact.content[:80]}"
+        )
 
     if warnings:
         for warning in warnings:
