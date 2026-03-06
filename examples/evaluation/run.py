@@ -198,47 +198,57 @@ async def main() -> int:
     else:
         scenario_names = [args.scenario]
 
+    failed_scenarios: list[str] = []
+
     try:
         for scenario_name in scenario_names:
-            # Create config for this scenario
-            config = EvaluatorConfig(
-                turn_counts=turn_counts,
-                iterations_per_turn_count=args.iterations,
-                max_concurrent=args.max_concurrent,
-                scenario_name=scenario_name,
-                verbose=args.verbose,
-                output_dir=args.output,
-                keep_data=args.keep_data,
-                chat_config=chat_config,
+            try:
+                config = EvaluatorConfig(
+                    turn_counts=turn_counts,
+                    iterations_per_turn_count=args.iterations,
+                    max_concurrent=args.max_concurrent,
+                    scenario_name=scenario_name,
+                    verbose=args.verbose,
+                    output_dir=args.output,
+                    keep_data=args.keep_data,
+                    chat_config=chat_config,
+                )
+
+                evaluator = Evaluator(config)
+
+                if args.quick:
+                    result = await evaluator.run_quick_test(turn_count=turn_counts[0])
+                    console.print(f"\n[green]Quick test completed for {scenario_name}![/green]")
+                    if result.recall_hit_rate < 0.8:
+                        failed_scenarios.append(scenario_name)
+                else:
+                    report = await evaluator.run_evaluation()
+
+                    json_path, md_path = save_reports(report, config.output_dir)
+
+                    console.print(f"\n[bold]Reports saved for {scenario_name}:[/bold]")
+                    console.print(f"  JSON: {json_path}")
+                    console.print(f"  Markdown: {md_path}")
+
+            except Exception as e:
+                console.print(
+                    f"\n[red]Scenario '{scenario_name}' failed: {e}[/red]"
+                )
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+                failed_scenarios.append(scenario_name)
+
+        if failed_scenarios:
+            console.print(
+                f"\n[yellow]Failed scenarios: {', '.join(failed_scenarios)}[/yellow]"
             )
-
-            evaluator = Evaluator(config)
-
-            if args.quick:
-                result = await evaluator.run_quick_test(turn_count=turn_counts[0])
-                console.print(f"\n[green]Quick test completed for {scenario_name}![/green]")
-                if result.recall_hit_rate < 0.8:
-                    return 1
-            else:
-                report = await evaluator.run_evaluation()
-
-                json_path, md_path = save_reports(report, config.output_dir)
-
-                console.print(f"\n[bold]Reports saved for {scenario_name}:[/bold]")
-                console.print(f"  JSON: {json_path}")
-                console.print(f"  Markdown: {md_path}")
-
+            return 1
         return 0
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Evaluation interrupted by user[/yellow]")
         return 130
-    except Exception as e:
-        console.print(f"\n[red]Error: {e}[/red]")
-        if args.verbose:
-            import traceback
-            traceback.print_exc()
-        return 1
 
 
 def run() -> None:
