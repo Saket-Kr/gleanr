@@ -307,7 +307,7 @@ class Gleanr:
             await self._reflection_runner.reflect_episode(
                 episode,
                 turns,
-                background=False,  # Run synchronously for now
+                background=self._config.reflection.background,
             )
 
         except Exception:

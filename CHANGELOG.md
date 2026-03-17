@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+## [0.3.0] - 2026-03-16
+
+### Fixed
+
+- **Stale turn recall**: When active facts exist, vector search on past
+  episode turns and marked-turn retrieval are now skipped. Facts are the
+  maintained, current-truth representation; raw turns from past episodes
+  carried stale information that contradicted updated facts. Configurable
+  via `facts_only_recall` (default: `True`). Falls back to turn-based recall
+  when no facts exist (reflection disabled or first episode).
+- **Consolidation scoping**: `consolidation_max_unscoped_facts` raised from
+  50 to 100, matching `max_active_facts`. Similarity-based scoping
+  effectively never triggers, preventing exclusion of facts that need
+  updating in contradiction scenarios.
+
+### Added
+
+- **Fact candidate cap**: New `max_fact_candidates` config (default: 20)
+  limits recall to the top-K facts by score after relevance filtering,
+  reducing noise from weakly-related filler facts and improving precision.
+- **Facts-only recall**: New `facts_only_recall` config (default: `True`)
+  skips vector search on past turns when active facts exist, eliminating the
+  primary source of staleness and low precision.
+- **Background reflection**: New `ReflectionConfig.background` config
+  (default: `True`) runs reflection asynchronously after episode closure.
+  Eliminates ingest latency spikes (p95 reduced from ~43s to <1s at episode
+  boundaries). Use `wait_pending()` to drain the queue. Set to `False` for
+  synchronous mode.
+
+### Changed
+
+- `consolidation_max_unscoped_facts` default raised from 50 to 100.
+- `dedup_similarity_threshold` default lowered from 0.95 to 0.90, catching
+  paraphrase-level duplicates that previously accumulated as separate facts.
+- Reflection now runs in the background by default (`background=True`).
+
 ## [0.2.0] - 2026-03-06
 
 ### Fixed
@@ -76,5 +113,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Observability via ReflectionTrace callbacks.
 - Evaluation harness with configurable scenarios and metrics.
 
+[0.3.0]: https://github.com/Saket-Kr/gleanr/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Saket-Kr/gleanr/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Saket-Kr/gleanr/releases/tag/v0.1.0

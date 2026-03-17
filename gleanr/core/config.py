@@ -48,6 +48,16 @@ class RecallConfig:
     min_relevance_threshold: float = 0.3
     """Minimum relevance score to include in results."""
 
+    max_fact_candidates: int = 20
+    """Maximum number of fact candidates to include in recall results.
+    After relevance filtering, only the top-K facts by score are kept."""
+
+    facts_only_recall: bool = True
+    """When active facts exist, skip vector search on past turns and marked turns.
+    Facts are the maintained, current-truth representation of past episodes.
+    Raw turns from past episodes can carry stale information that contradicts
+    updated facts. Set to False to include past turns alongside facts."""
+
     def validate(self) -> None:
         """Validate configuration values."""
         if self.current_episode_budget_pct < 0 or self.current_episode_budget_pct > 1:
@@ -68,6 +78,12 @@ class ReflectionConfig:
     enabled: bool = True
     """Whether reflection is enabled."""
 
+    background: bool = True
+    """Run reflection asynchronously after episode closure.
+    When True, episode closure returns immediately and reflection runs
+    as a background task. Use ``wait_pending()`` to ensure completion.
+    Set to False to block until reflection finishes."""
+
     min_episode_turns: int = 2
     """Minimum turns in episode to trigger reflection."""
 
@@ -81,15 +97,17 @@ class ReflectionConfig:
     """Minimum embedding similarity for a prior fact to be included in consolidation scope.
     Only applies when the number of active facts exceeds consolidation_max_unscoped_facts."""
 
-    consolidation_max_unscoped_facts: int = 50
+    consolidation_max_unscoped_facts: int = 100
     """Skip similarity-based scoping when the active fact count is at or below this limit.
-    All facts are sent to the LLM for consolidation, ensuring none are missed."""
+    All facts are sent to the LLM for consolidation, ensuring none are missed.
+    Defaults to 100, matching max_active_facts, so scoping is effectively
+    disabled unless max_active_facts is raised above this value."""
 
     max_active_facts: int = 100
     """Maximum number of active (non-superseded) facts per session.
     When exceeded, lowest-confidence facts are archived after reflection."""
 
-    dedup_similarity_threshold: float = 0.95
+    dedup_similarity_threshold: float = 0.90
     """Cosine similarity above which a new fact is considered a duplicate of an existing active fact.
     Set to 1.0 to disable deduplication."""
 
@@ -186,9 +204,12 @@ class GleanrConfig:
                 "current_episode_budget_pct": self.recall.current_episode_budget_pct,
                 "max_vector_results": self.recall.max_vector_results,
                 "min_relevance_threshold": self.recall.min_relevance_threshold,
+                "max_fact_candidates": self.recall.max_fact_candidates,
+                "facts_only_recall": self.recall.facts_only_recall,
             },
             "reflection": {
                 "enabled": self.reflection.enabled,
+                "background": self.reflection.background,
                 "min_episode_turns": self.reflection.min_episode_turns,
                 "max_facts_per_episode": self.reflection.max_facts_per_episode,
                 "min_confidence": self.reflection.min_confidence,

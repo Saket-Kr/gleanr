@@ -22,10 +22,11 @@ class RecallPipeline:
 
     Implements the recall algorithm:
     1. Embed query
-    2. Gather candidates (current episode, marked turns, L2 facts, vector search)
-    3. Score candidates (relevance + marker boost, NO recency)
-    4. Budget allocation
-    5. Assemble context
+    2. Gather fact candidates (L2 — maintained, current-truth context)
+    3. If no facts exist, fall back to marked turns and vector search on past turns
+    4. Always include current episode turns (working context)
+    5. Score candidates (relevance + marker boost, NO recency)
+    6. Budget allocation and assembly
     """
 
     def __init__(
@@ -74,15 +75,27 @@ class RecallPipeline:
         if include_current_episode:
             current_episode_candidates = await self._get_current_episode_candidates()
 
-        marked_candidates = await self._get_marked_candidates(query_embedding)
         fact_candidates = await self._get_fact_candidates(query_embedding)
-        vector_candidates = await self._get_vector_candidates(query_embedding, min_relevance)
+
+        # When active facts exist, they are the maintained current-truth
+        # representation of past episodes. Raw turns from past episodes can
+        # carry stale information that contradicts updated facts, so we skip
+        # vector search and marked-turn retrieval. When no facts exist
+        # (reflection disabled, first episode, or legacy mode), fall back to
+        # turn-based recall.
+        use_facts_only = self._config.recall.facts_only_recall and bool(fact_candidates)
+
+        marked_candidates: list[ScoredCandidate] = []
+        vector_candidates: list[ScoredCandidate] = []
+
+        if not use_facts_only:
+            marked_candidates = await self._get_marked_candidates(query_embedding)
+            vector_candidates = await self._get_vector_candidates(query_embedding, min_relevance)
 
         # Step 3: Deduplicate (current episode may overlap with vector results)
         current_ids = {c.id for c in current_episode_candidates}
         marked_ids = {c.id for c in marked_candidates}
 
-        # Remove duplicates from vector candidates
         unique_vector_candidates = [
             c for c in vector_candidates if c.id not in current_ids and c.id not in marked_ids
         ]
@@ -179,7 +192,7 @@ class RecallPipeline:
             )
 
         candidates.sort(key=lambda c: c.final_score, reverse=True)
-        return candidates
+        return candidates[: self._config.recall.max_fact_candidates]
 
     async def _get_vector_candidates(
         self,

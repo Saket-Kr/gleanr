@@ -76,6 +76,7 @@ class StubLegacyReflector:
 def _reflection_config() -> ReflectionConfig:
     return ReflectionConfig(
         enabled=True,
+        background=False,
         min_episode_turns=2,
         min_confidence=0.7,
     )
